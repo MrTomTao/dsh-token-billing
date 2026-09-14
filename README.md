@@ -159,6 +159,10 @@ pnpm test                # = node test/projection.test.mjs
 - **`--dump-config` 不是只读的**：它会重写 profile 里的 `cordis.yml`，在受限环境下需要该目录写权限。
 - **样式对齐官方头部控件**：徽标按同 slot 官方按钮的规格写（28px 行高、`0.5px solid var(--dsw-alias-border-l4)` 发丝边框、`14px` 胶囊圆角、11px/400 字号、hover 用 `--dsw-alias-interactive-bg-hover` 铺底），规格抄自 `packages/client/ui-open-in-app/src/client/OpenInAppAction.module.css`。注意 `--dsw-alias-border-l4`、`--dsw-alias-interactive-bg-hover`、`--dsw-font-family` **不在**运行时 token 查询/覆盖列表里（那份列表只暴露 13 个 alias，边框类只有 `-l1`/`-l2`），但它们在上游主题表里真实存在、官方组件也在用，因此在页面里能正常解析；只是不能用 `theme.overrideTokens` 覆盖它们。
 
+## AI 生成说明
+
+本项目全部代码均为DSH生成。
+
 ## License
 
 MIT，见 [LICENSE](./LICENSE)。
