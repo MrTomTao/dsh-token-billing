@@ -1,0 +1,29 @@
+# The dsh-token-billing bundle layer.
+#
+# Installed as a bundle, this file is applied after @deepseek-ai/dsh-base (and
+# after the surface bundle that mounts the web UI), and it inserts exactly one
+# row. That package carries both halves of the feature:
+#
+#   * its Node half registers the `tokenBilling` session projection (the fold
+#     that turns provider usage into peak/off-peak token buckets per model);
+#   * its `dsh.client` half ships the browser bundle that renders the cost
+#     badge in the session header and the detail panel behind it.
+#
+# Prices are composition config, not code. To change them, override this row in
+# your own profile's cordis.patch.yml ($DSH_HOME/profiles/<name>/cordis.patch.yml)
+# — a patch replaces the targeted row's WHOLE `config`, so restate every key:
+#
+#   - id: token-billing
+#     config:
+#       prices:
+#         CNY:
+#           deepseek-flash: { hit: 0.04, miss: 2, output: 8 }
+#           deepseek-v4-pro: { hit: 0.3, miss: 9, output: 27 }
+#       aliases:
+#         my-gateway-model: deepseek-flash
+#
+# Omitted keys keep the built-in official defaults documented in README.md.
+
+- insert:
+    - id: token-billing
+      name: dsh-token-billing

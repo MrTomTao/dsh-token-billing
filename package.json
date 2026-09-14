@@ -1,0 +1,52 @@
+{
+  "name": "dsh-token-billing",
+  "version": "0.1.2",
+  "description": "Session token billing for the DeepSeek Harness: a host-registered cost projection plus a live cost badge with a detail panel in the web session header",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "cordis",
+    "plugin",
+    "billing",
+    "cost",
+    "tokens"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
+  },
+  "files": [
+    "lib/index.js",
+    "lib/client.js",
+    "src",
+    "test",
+    "cordis.patch.yml",
+    "build.mjs",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node test/projection.test.mjs",
+    "prepare": "node build.mjs"
+  },
+  "dependencies": {
+    "zod": "^4.6.4"
+  }
+}
