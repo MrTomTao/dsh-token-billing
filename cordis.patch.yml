@@ -5,13 +5,15 @@
 # row. That package carries both halves of the feature:
 #
 #   * its Node half registers the `tokenBilling` session projection (the fold
-#     that turns provider usage into peak/off-peak token buckets per model);
-#   * its `dsh.client` half ships the browser bundle that renders the cost
-#     badge in the session header and the detail panel behind it.
+#     that turns provider usage into peak/off-peak token buckets per model),
+#     and serves the read-only `balance.route` the balance badge reads;
+#   * its `dsh.client` half ships the browser bundle that renders the cost and
+#     balance badges in the session header and the detail panels behind them.
 #
-# Prices are composition config, not code. To change them, override this row in
-# your own profile's cordis.patch.yml ($DSH_HOME/profiles/<name>/cordis.patch.yml)
-# — a patch replaces the targeted row's WHOLE `config`, so restate every key:
+# Prices — and the balance probe — are composition config, not code. To change
+# them, override this row in your own profile's cordis.patch.yml
+# ($DSH_HOME/profiles/<name>/cordis.patch.yml) — a patch replaces the targeted
+# row's WHOLE `config`, so restate every key you care about:
 #
 #   - id: token-billing
 #     config:
@@ -21,8 +23,12 @@
 #           deepseek-v4-pro: { hit: 0.3, miss: 9, output: 27 }
 #       aliases:
 #         my-gateway-model: deepseek-flash
+#       balance:
+#         apiKeyEnv: DEEPSEEK_API_KEY
+#         baseUrl: https://api.deepseek.com
+#         refreshMs: 60000
 #
-# Omitted keys keep the built-in official defaults documented in README.md.
+# Omitted keys keep the built-in documented defaults in README.md.
 
 - insert:
     - id: token-billing

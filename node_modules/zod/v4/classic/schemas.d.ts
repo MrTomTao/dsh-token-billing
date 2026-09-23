@@ -788,7 +788,9 @@ export declare const describe: typeof core.describe;
 export declare const meta: typeof core.meta;
 type ZodInstanceOfParams = core.Params<ZodCustom, core.$ZodIssueCustom, "type" | "check" | "checks" | "fn" | "abort" | "error" | "params" | "path">;
 export interface ZodInstanceOf<T = unknown> extends ZodCustom<T, T> {
-    properties<Shape extends core.$ZodShape>(shape: Shape, params?: string | core.$ZodCheckPropertiesParams): ZodInstanceOf<T & core.$InferObjectInput<Shape, {}>>;
+    properties<Shape extends {
+        [k in keyof T as T[k] extends Function ? never : k]?: core.$ZodType<unknown, T[k]>;
+    }>(shape: Shape, params?: string | core.$ZodCheckPropertiesParams): ZodInstanceOf<T & core.$InferObjectInput<Shape, {}>>;
 }
 export declare const ZodInstanceOf: core.$constructor<ZodInstanceOf>;
 declare function _instanceof<T extends typeof util.Class>(cls: T, params?: ZodInstanceOfParams): ZodInstanceOf<InstanceType<T>>;

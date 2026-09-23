@@ -1,7 +1,7 @@
 {
   "name": "dsh-token-billing",
-  "version": "0.1.2",
-  "description": "Session token billing for the DeepSeek Harness: a host-registered cost projection plus a live cost badge with a detail panel in the web session header",
+  "version": "0.2.0",
+  "description": "Session token billing for the DeepSeek Harness: a host-registered cost projection plus a live cost badge, and an account-balance badge, in the web session header",
   "keywords": [
     "dsh",
     "deepseek-harness",
@@ -9,6 +9,7 @@
     "plugin",
     "billing",
     "cost",
+    "balance",
     "tokens"
   ],
   "license": "MIT",

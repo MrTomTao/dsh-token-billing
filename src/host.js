@@ -22,6 +22,11 @@
  * attempt replaces its own turn/step sample instead of adding to it), so the
  * tokens this plugin prices agree with the usage the Web UI already reports.
  *
+ * Besides that projection, `apply` serves one same-origin GET answering what is
+ * left in the wallet that pays for those tokens (see {@link DEFAULT_BALANCE}).
+ * The browser half holds no credential and calls no third party: it reads the
+ * numbers off that route.
+ *
  * @module dsh-token-billing
  */
 
@@ -85,6 +90,35 @@ const OFF_PEAK = 0.5
 
 const PER_MILLION = 1000000
 
+/**
+ * Defaults for the account-balance probe.
+ *
+ * The wallet that pays for these tokens is the DeepSeek open-platform account,
+ * and this harness already knows it two ways. They are tried in this order:
+ *
+ * 1. `ctx.deepseekAccount` — the signed-in DeepSeek Platform account, whose
+ *    `getBalance()` returns the recharge and bonus wallets. It is the same
+ *    number the account settings surface shows, and it needs no credential
+ *    handling here.
+ * 2. `GET {baseUrl}{path}` — the open-platform REST endpoint the inference API
+ *    key unlocks, resolved per request from `ctx.credentials` under
+ *    `apiKeyEnv`. This is the path that works with a plain API key and no
+ *    browser authorization.
+ *
+ * Either way the browser only ever receives numbers: no token, no key.
+ */
+export const DEFAULT_BALANCE = {
+  enabled: true,
+  route: '/token-billing/balance',
+  apiKeyEnv: 'DEEPSEEK_API_KEY',
+  baseUrl: 'https://api.deepseek.com',
+  path: '/user/balance',
+  /** How long one success — and one failure — is reused before asking again. */
+  refreshMs: 60000,
+  failureMs: 15000,
+  timeoutMs: 10000,
+}
+
 /* ────────────────────────────── config ────────────────────────────── */
 
 /** A finite, non-negative number, or the fallback. */
@@ -95,6 +129,50 @@ function amount(value, fallback) {
 /** Plain-object check that tolerates null and arrays. */
 function isRecord(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+/** A finite money amount from a JSON number or numeric string, or null. */
+function money(value) {
+  const parsed = typeof value === 'string' ? Number(value) : value
+  return typeof parsed === 'number' && Number.isFinite(parsed) ? parsed : null
+}
+
+/** A positive duration in whole milliseconds, or the fallback. */
+function duration(value, fallback) {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback
+}
+
+/** A non-empty trimmed string, or the fallback. */
+function text(value, fallback) {
+  return typeof value === 'string' && value.trim() !== '' ? value.trim() : fallback
+}
+
+/** A path that starts with exactly one leading slash. */
+function rooted(value) {
+  return value.startsWith('/') ? value : `/${value}`
+}
+
+/**
+ * Merge one instance's balance options over the defaults. A credential name
+ * outside the reference grammar falls back to the default rather than being
+ * passed on: it could never resolve, and silently probing the wrong wallet is
+ * worse than probing the documented one.
+ * @param raw - the row's `balance` block, or undefined.
+ * @returns the resolved balance options of this instance.
+ */
+export function normalizeBalance(raw) {
+  const source = isRecord(raw) ? raw : {}
+  const env = text(source.apiKeyEnv, DEFAULT_BALANCE.apiKeyEnv)
+  return {
+    enabled: typeof source.enabled === 'boolean' ? source.enabled : DEFAULT_BALANCE.enabled,
+    route: rooted(text(source.route, DEFAULT_BALANCE.route)),
+    apiKeyEnv: /^[A-Za-z_][A-Za-z0-9_]*$/.test(env) ? env : DEFAULT_BALANCE.apiKeyEnv,
+    baseUrl: text(source.baseUrl, DEFAULT_BALANCE.baseUrl).replace(/\/+$/, ''),
+    path: rooted(text(source.path, DEFAULT_BALANCE.path)),
+    refreshMs: duration(source.refreshMs, DEFAULT_BALANCE.refreshMs),
+    failureMs: duration(source.failureMs, DEFAULT_BALANCE.failureMs),
+    timeoutMs: duration(source.timeoutMs, DEFAULT_BALANCE.timeoutMs),
+  }
 }
 
 /**
@@ -133,7 +211,7 @@ function normalizeConfig(config) {
     }
   }
 
-  return { prices, aliases }
+  return { prices, aliases, balance: normalizeBalance(raw.balance) }
 }
 
 /* ────────────────────────────── pricing ────────────────────────────── */
@@ -553,13 +631,203 @@ function view(state, config) {
   }
 }
 
+/* ────────────────────────────── balance ────────────────────────────── */
+
+/** One wallet row, keyed by currency; a null field is "the source omits it". */
+function walletOf(currency, total, toppedUp, granted) {
+  return { currency: currency === 'USD' ? 'USD' : 'CNY', total, toppedUp, granted }
+}
+
+/**
+ * Signed-in Platform wallets: the recharge rows in `value` and the bonus rows
+ * in `bonusWallets`, summed per currency. The Platform query reports the two
+ * separately and never their total, so it is added here.
+ * @param detail - a `ready` account balance outcome.
+ * @returns one row per reported currency.
+ */
+export function walletsOfPlatform(detail) {
+  const table = new Map()
+  const merge = (rows, field) => {
+    if (!Array.isArray(rows)) return
+    for (const row of rows) {
+      if (!isRecord(row)) continue
+      const value = money(row.balance)
+      if (value === null) continue
+      const currency = row.currency === 'USD' ? 'USD' : 'CNY'
+      const current = table.get(currency) ?? { currency, toppedUp: null, granted: null }
+      current[field] = (current[field] ?? 0) + value
+      table.set(currency, current)
+    }
+  }
+  merge(detail === undefined || detail === null ? undefined : detail.value, 'toppedUp')
+  merge(detail === undefined || detail === null ? undefined : detail.bonusWallets, 'granted')
+  return [...table.values()].map(row => ({
+    ...row,
+    total: (row.toppedUp ?? 0) + (row.granted ?? 0),
+  }))
+}
+
+/**
+ * Open-platform `GET /user/balance` wallets. A row whose total is not a number
+ * is dropped: the panel must never show a parse failure as a zero balance.
+ * @param body - the decoded response body.
+ * @returns one row per reported currency.
+ */
+export function walletsOfRest(body) {
+  const rows = isRecord(body) && Array.isArray(body.balance_infos) ? body.balance_infos : []
+  const wallets = []
+  for (const row of rows) {
+    if (!isRecord(row)) continue
+    const total = money(row.total_balance)
+    if (total === null) continue
+    wallets.push(walletOf(row.currency, total, money(row.topped_up_balance), money(row.granted_balance)))
+  }
+  return wallets
+}
+
+/**
+ * One instance's balance probe, memoized so several badges — or two open tabs —
+ * cost one upstream request per `refreshMs`, and one failure per `failureMs`
+ * rather than one per click.
+ *
+ * The resolver is read from the context per request, never captured at apply
+ * time, so a key rotated in settings reaches the next probe without a restart.
+ * @param ctx - the plugin context (any service it needs is looked up optionally).
+ * @param balance - this instance's resolved balance options.
+ * @returns `read(force)` -> the payload the route serves.
+ */
+export function createBalanceReader(ctx, balance) {
+  let cache = null
+  let inflight = null
+
+  /** The signed-in Platform account, or null when this path has nothing to say. */
+  async function fromPlatform() {
+    const account = ctx.get('deepseekAccount')
+    if (account === undefined || account === null) return null
+    const state = await account.getState()
+    if (state === undefined || state === null || state.status !== 'credential-stored') return null
+    const detail = await account.getBalance()
+    if (detail === undefined || detail === null || detail.status !== 'ready') return null
+    const wallets = walletsOfPlatform(detail)
+    return wallets.length === 0 ? null : { ok: true, source: 'platform', available: true, wallets }
+  }
+
+  /** The open-platform REST probe, authorized with the inference API key. */
+  async function fromRest() {
+    const credentials = ctx.get('credentials')
+    if (credentials === undefined || credentials === null) return { ok: false, reason: 'no-credential' }
+    const hit = await credentials.resolve(balance.apiKeyEnv)
+    if (hit === undefined || hit === null || typeof hit.value !== 'string' || hit.value === '') {
+      return { ok: false, reason: 'no-credential' }
+    }
+    let response
+    try {
+      response = await fetch(`${balance.baseUrl}${balance.path}`, {
+        headers: { authorization: `Bearer ${hit.value}`, accept: 'application/json' },
+        signal: AbortSignal.timeout(balance.timeoutMs),
+      })
+    } catch (error) {
+      const timedOut = error !== null && typeof error === 'object' && error.name === 'TimeoutError'
+      return { ok: false, reason: timedOut ? 'timeout' : 'network' }
+    }
+    if (!response.ok) return { ok: false, reason: 'http', status: response.status }
+    let body
+    try {
+      body = await response.json()
+    } catch {
+      return { ok: false, reason: 'protocol' }
+    }
+    const wallets = walletsOfRest(body)
+    if (wallets.length === 0) return { ok: false, reason: 'protocol' }
+    return {
+      ok: true,
+      source: 'api-key',
+      available: !(isRecord(body) && body.is_available === false),
+      wallets,
+    }
+  }
+
+  /** Try the signed-in account first; a signed-out or failing one falls through. */
+  async function probe() {
+    try {
+      const platform = await fromPlatform()
+      if (platform !== null) return platform
+    } catch {
+      // A stored grant that could not be read is exactly when the API-key path
+      // is worth trying, so this is a fall-through, not a failure.
+    }
+    try {
+      return await fromRest()
+    } catch {
+      return { ok: false, reason: 'network' }
+    }
+  }
+
+  return function read(force) {
+    if (!force && cache !== null && Date.now() - cache.at < cache.ttl) {
+      return Promise.resolve({ ...cache.payload, cached: true })
+    }
+    if (inflight !== null) return inflight
+    const started = (async () => {
+      const payload = { ...await probe(), fetchedAt: Date.now(), refreshMs: balance.refreshMs }
+      cache = { at: payload.fetchedAt, ttl: payload.ok ? balance.refreshMs : balance.failureMs, payload }
+      return payload
+    })()
+    inflight = started
+    started.then(() => {
+      if (inflight === started) inflight = null
+    })
+    return started
+  }
+}
+
+/**
+ * Serve the balance over one same-origin GET. The browser half holds no
+ * credential, so this route is the whole cross-process surface: numbers out,
+ * nothing in. It is the same idiom the shipped plugins use
+ * (`ctx.webServer.register`), and it is registered through `ctx.inject` so a
+ * profile with no web server — a terminal or ACP surface — still loads this
+ * plugin for its projection.
+ * @param ctx - the plugin context.
+ * @param balance - this instance's resolved balance options.
+ */
+export function serveBalance(ctx, balance) {
+  const read = createBalanceReader(ctx, balance)
+  ctx.inject(['webServer'], webCtx => {
+    webCtx.effect(() => webCtx.webServer.register({
+      kind: 'exact',
+      path: balance.route,
+      handler: async (request, response) => {
+        if (request.method !== 'GET' && request.method !== 'HEAD') {
+          response.writeHead(405, { allow: 'GET' })
+          response.end()
+          return
+        }
+        const query = new URL(request.url === undefined ? '/' : request.url, 'http://localhost').searchParams
+        // A disabled probe still answers, because that answer is what tells the
+        // browser half to drop its badge rather than show a figure that will
+        // never arrive.
+        const payload = balance.enabled
+          ? await read(query.get('refresh') === '1')
+          : { ok: false, reason: 'disabled', fetchedAt: Date.now(), refreshMs: balance.refreshMs }
+        response.writeHead(200, {
+          'content-type': 'application/json; charset=utf-8',
+          'cache-control': 'no-store',
+        })
+        response.end(request.method === 'HEAD' ? undefined : JSON.stringify(payload))
+      },
+    }), 'token-billing: balance route')
+  })
+}
+
 /* ────────────────────────────── the plugin ────────────────────────────── */
 
 /**
- * Register the `tokenBilling` projection unit. The registration is an effect on
- * this plugin's fiber, so unloading removes the key.
+ * Register the `tokenBilling` projection unit, and the balance route the
+ * browser badge reads. Both registrations are effects on this plugin's fiber,
+ * so unloading removes the key and the route.
  * @param ctx - registrant context carrying the projection registry.
- * @param config - the row's config block (prices and aliases), or undefined.
+ * @param config - the row's config block (prices, aliases, balance), or undefined.
  */
 export function apply(ctx, config) {
   const resolved = normalizeConfig(config)
@@ -574,4 +842,5 @@ export function apply(ctx, config) {
       view: state => view(state, resolved),
     },
   })
+  serveBalance(ctx, resolved.balance)
 }

@@ -17,7 +17,16 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { test } from 'node:test'
 
-import { apply, inject, name } from '../lib/index.js'
+import {
+  apply,
+  createBalanceReader,
+  DEFAULT_BALANCE,
+  inject,
+  name,
+  normalizeBalance,
+  walletsOfPlatform,
+  walletsOfRest,
+} from '../lib/index.js'
 
 /** Peak window start: Monday 2026-01-05, 02:00 UTC. */
 const PEAK = Date.UTC(2026, 0, 5, 2, 0, 0)
@@ -29,7 +38,13 @@ const FLASH = { provider: 'deepseek', model: 'deepseek-flash' }
 /** Register the unit against a stub registry and hand back the definition. */
 function register(config) {
   const registered = []
-  apply({ sessionProjections: { register: definition => registered.push(definition) } }, config)
+  apply({
+    sessionProjections: { register: definition => registered.push(definition) },
+    // Present so `apply` can take the balance route path; `get` answers
+    // "no such service", which is the terminal/ACP shape of this plugin.
+    inject: () => () => {},
+    get: () => undefined,
+  }, config)
   assert.equal(registered.length, 1)
   return registered[0]
 }
@@ -219,6 +234,174 @@ test('an event the unit does not bill returns the same state reference', () => {
   assert.equal(unit.apply(state, message({ inputTokens: 0, outputTokens: 0 })), state)
 })
 
+/* ───────────────────────── the balance surface ───────────────────────── */
+
+test('the balance route and its defaults are configurable', () => {
+  const custom = normalizeBalance({
+    route: 'billing/balance',
+    apiKeyEnv: 'MY_KEY',
+    baseUrl: 'https://gateway.example.com/',
+    path: 'user/balance',
+    refreshMs: 5000,
+    timeoutMs: 2500,
+  })
+  assert.equal(custom.route, '/billing/balance')
+  assert.equal(custom.path, '/user/balance')
+  assert.equal(custom.apiKeyEnv, 'MY_KEY')
+  // Trailing slashes would double up when the path is appended.
+  assert.equal(custom.baseUrl, 'https://gateway.example.com')
+  assert.equal(custom.refreshMs, 5000)
+  assert.equal(custom.timeoutMs, 2500)
+  // An option the row did not state keeps the documented default.
+  assert.equal(custom.failureMs, DEFAULT_BALANCE.failureMs)
+  assert.equal(custom.enabled, true)
+})
+
+test('a credential name outside the reference grammar falls back instead of resolving nothing', () => {
+  assert.equal(normalizeBalance({ apiKeyEnv: 'not a ref' }).apiKeyEnv, DEFAULT_BALANCE.apiKeyEnv)
+  assert.equal(normalizeBalance({ apiKeyEnv: '' }).apiKeyEnv, DEFAULT_BALANCE.apiKeyEnv)
+  assert.equal(normalizeBalance().enabled, true)
+  assert.equal(normalizeBalance({ enabled: false }).enabled, false)
+})
+
+test('platform wallets merge recharge and bonus per currency', () => {
+  const wallets = walletsOfPlatform({
+    status: 'ready',
+    value: [{ currency: 'CNY', balance: '300.00' }],
+    bonusWallets: [
+      { currency: 'CNY', balance: '42.18' },
+      { currency: 'USD', balance: '5.00' },
+    ],
+  })
+  assert.deepEqual(wallets, [
+    { currency: 'CNY', toppedUp: 300, granted: 42.18, total: 342.18 },
+    { currency: 'USD', toppedUp: null, granted: 5, total: 5 },
+  ])
+})
+
+test('an unparseable wallet is dropped, never counted as zero', () => {
+  const wallets = walletsOfRest({
+    is_available: true,
+    balance_infos: [
+      { currency: 'CNY', total_balance: '342.18', granted_balance: '0.00', topped_up_balance: '342.18' },
+      { currency: 'USD', total_balance: 'oops' },
+    ],
+  })
+  assert.equal(wallets.length, 1)
+  assert.deepEqual(wallets[0], { currency: 'CNY', total: 342.18, toppedUp: 342.18, granted: 0 })
+  assert.deepEqual(walletsOfRest({}), [])
+})
+
+test('the reader prefers the signed-in account and falls back to the API key', async () => {
+  const calls = []
+  const ctx = {
+    get: service => {
+      if (service === 'deepseekAccount') {
+        return {
+          getState: async () => ({ status: 'credential-stored' }),
+          getBalance: async () => ({ status: 'ready', value: [{ currency: 'CNY', balance: '12.5' }], bonusWallets: [] }),
+        }
+      }
+      if (service === 'credentials') {
+        return { resolve: async ref => { calls.push(ref); return { value: 'sk-test', source: 'store' } } }
+      }
+      return undefined
+    },
+  }
+  const read = createBalanceReader(ctx, normalizeBalance({ enabled: true }))
+  const payload = await read(false)
+  assert.equal(payload.ok, true)
+  assert.equal(payload.source, 'platform')
+  // No bonus wallet was reported, so `granted` stays "the source omits it"
+  // rather than becoming a fabricated zero the panel would print.
+  assert.deepEqual(payload.wallets, [{ currency: 'CNY', toppedUp: 12.5, granted: null, total: 12.5 }])
+  // The signed-in path answered, so the API key was never even resolved.
+  assert.deepEqual(calls, [])
+  assert.equal(payload.refreshMs, DEFAULT_BALANCE.refreshMs)
+  assert.equal(typeof payload.fetchedAt, 'number')
+})
+
+test('a signed-out account falls through to the API key and memoizes the answer', async () => {
+  const previous = globalThis.fetch
+  const requests = []
+  globalThis.fetch = async (url, init) => {
+    requests.push({ url, authorization: init.headers.authorization })
+    return {
+      ok: true,
+      json: async () => ({
+        is_available: true,
+        balance_infos: [{ currency: 'CNY', total_balance: '342.18', granted_balance: '0.00', topped_up_balance: '342.18' }],
+      }),
+    }
+  }
+  try {
+    const ctx = {
+      get: service => {
+        if (service === 'deepseekAccount') return { getState: async () => ({ status: 'signed-out' }) }
+        if (service === 'credentials') return { resolve: async () => ({ value: 'sk-test', source: 'store' }) }
+        return undefined
+      },
+    }
+    const read = createBalanceReader(ctx, normalizeBalance())
+    const first = await read(false)
+    const second = await read(false)
+    assert.equal(first.ok, true)
+    assert.equal(first.source, 'api-key')
+    assert.equal(first.wallets[0].total, 342.18)
+    assert.equal(first.cached, undefined)
+    // The second read is the cache, so upstream saw exactly one request.
+    assert.equal(second.cached, true)
+    assert.equal(requests.length, 1)
+    assert.equal(requests[0].url, 'https://api.deepseek.com/user/balance')
+    assert.equal(requests[0].authorization, 'Bearer sk-test')
+  } finally {
+    globalThis.fetch = previous
+  }
+})
+
+test('a missing credential is reported, not shown as a zero balance', async () => {
+  const read = createBalanceReader({ get: () => undefined }, normalizeBalance())
+  const payload = await read(false)
+  assert.equal(payload.ok, false)
+  assert.equal(payload.reason, 'no-credential')
+  assert.equal(payload.wallets, undefined)
+})
+
+test('the balance route is registered on the web server', () => {
+  const routes = []
+  const ctx = {
+    sessionProjections: { register: () => {} },
+    inject: (deps, callback) => { assert.deepEqual(deps, ['webServer']); callback({ effect: fn => fn(), webServer: { register: route => { routes.push(route); return () => {} } } }) },
+    get: () => undefined,
+  }
+  apply(ctx, undefined)
+  assert.equal(routes.length, 1)
+  assert.equal(routes[0].kind, 'exact')
+  assert.equal(routes[0].path, DEFAULT_BALANCE.route)
+})
+
+test('a disabled probe answers without resolving a credential', async () => {
+  const routes = []
+  const ctx = {
+    sessionProjections: { register: () => {} },
+    inject: (deps, callback) => { callback({ effect: fn => fn(), webServer: { register: route => { routes.push(route); return () => {} } } }) },
+    get: () => { throw new Error('a disabled probe must not touch a service') },
+  }
+  apply(ctx, { balance: { enabled: false } })
+
+  const seen = {}
+  await routes[0].handler(
+    { method: 'GET', url: DEFAULT_BALANCE.route },
+    {
+      writeHead: (status, headers) => { seen.status = status; seen.headers = headers },
+      end: body => { seen.body = body },
+    },
+  )
+  assert.equal(seen.status, 200)
+  assert.equal(seen.headers['cache-control'], 'no-store')
+  assert.deepEqual(JSON.parse(seen.body).reason, 'disabled')
+})
+
 /* ───────────────────────── the browser bundle ───────────────────────── */
 
 /** Minimal React/ReactDOM surface: enough to run the component as a pure function. */
@@ -228,12 +411,36 @@ function reactStub(openInitial) {
     Fragment: 'Fragment',
     createElement: (type, props, ...children) => ({ type, props: props ?? {}, children }),
     useEffect: () => {},
+    useRef: initial => ({ current: initial }),
+    useCallback: callback => callback,
     useState: initial => {
       // The component's first useState is the panel's `open` flag.
       const value = useStateCalls === 0
         ? openInitial
         : (typeof initial === 'function' ? initial() : initial)
       useStateCalls += 1
+      return [value, () => {}]
+    },
+  }
+}
+
+/**
+ * The same stub, except its first `useState` answers with a probe result: the
+ * balance component's state comes before its `open` flag.
+ */
+function balanceStub(state, openInitial) {
+  const base = reactStub(openInitial)
+  let calls = 0
+  return {
+    ...base,
+    useState: initial => {
+      // First hook is the probe state, second is the panel's open flag.
+      const value = calls === 0
+        ? state
+        : calls === 1
+          ? openInitial
+          : (typeof initial === 'function' ? initial() : initial)
+      calls += 1
       return [value, () => {}]
     },
   }
@@ -291,7 +498,7 @@ const VIEW = {
   updatedAt: Date.UTC(2026, 0, 5, 2, 0, 0),
 }
 
-test('the bundle registers one header entry under the package id', async () => {
+test('the bundle registers both header entries under the package id', async () => {
   const row = await loadBundle()
   assert.equal(row.id, 'dsh-token-billing')
   assert.equal(typeof row.factory, 'function')
@@ -323,12 +530,18 @@ test('the bundle registers one header entry under the package id', async () => {
     globalThis.document = captured
   }
 
-  assert.equal(registration.length, 1)
+  assert.equal(registration.length, 2)
   assert.deepEqual(registration[0].options, {
     name: 'conversation.session.header.utilities',
     id: 'token-billing',
     order: -5,
     label: 'Token 计费',
+  })
+  assert.deepEqual(registration[1].options, {
+    name: 'conversation.session.header.utilities',
+    id: 'token-balance',
+    order: -4,
+    label: 'DeepSeek 余额',
   })
   assert.deepEqual(effects, ['dsh-token-billing: stylesheet'])
 })
@@ -372,7 +585,7 @@ test('an absent projection renders a muted badge instead of throwing', async () 
  * The document stub stays installed for the whole render because the panel
  * portals onto `document.body`.
  */
-function renderTree(row, react, value) {
+function renderTree(row, react, value, id = 'token-billing') {
   let Component
   const documentStub = {
     createElement: () => ({ dataset: {}, remove() {} }),
@@ -386,7 +599,10 @@ function renderTree(row, react, value) {
       effect: callback => { callback() },
       slots: {
         inject: (slot, callback) => { callback() },
-        register: (options, Registered) => { Component = Registered; return () => {} },
+        register: (options, Registered) => {
+          if (options.id === id) Component = Registered
+          return () => {}
+        },
       },
     })
     return Component({ useProjection: key => (key === 'tokenBilling' ? value : undefined) })
@@ -438,4 +654,88 @@ test('every priced model gets its own rate line', async () => {
   // Each line's term is its own model id.
   const terms = nodesOf(tree, 'dt').map(node => textsOf(node).join(''))
   assert.deepEqual(terms.slice(-2), ['deepseek-flash', 'deepseek-v4-pro'])
+})
+
+/* ───────────────────────── the balance badge ───────────────────────── */
+
+/** A realistic ready probe: the shape the Host route serves. */
+const BALANCE = {
+  ok: true,
+  source: 'api-key',
+  available: true,
+  wallets: [{ currency: 'CNY', total: 342.18, toppedUp: 342.18, granted: 0 }],
+  fetchedAt: Date.UTC(2026, 0, 5, 2, 0, 0),
+  refreshMs: 60000,
+}
+
+test('a ready probe formats the total and splits the two wallets', async () => {
+  const { balanceView } = await loadBundle().then(row => row.factory(requireStub(reactStub(false))))
+  const view = balanceView({ status: 'ready', payload: BALANCE })
+  assert.equal(view.amount, '¥342.18')
+  assert.equal(view.source, 'API Key 对应的账户')
+  assert.equal(view.problem, null)
+  assert.deepEqual(view.rows.map(entry => entry.label), ['账户总余额', '充值余额', '赠送余额'])
+  assert.deepEqual(view.rows.map(entry => entry.value), ['¥342.18', '¥342.18', '¥0'])
+})
+
+test('a probe with no figure is a reason, never a zero balance', async () => {
+  const { balanceView } = await loadBundle().then(row => row.factory(requireStub(reactStub(false))))
+  const view = balanceView({ status: 'error', reason: 'no-credential' })
+  assert.equal(view.amount, '--')
+  assert.deepEqual(view.rows, [])
+  assert.equal(view.source, null)
+  assert.match(view.problem, /API Key/)
+})
+
+test('the closed balance badge shows the figure beside the cost badge', async () => {
+  const row = await loadBundle()
+  const text = textsOf(renderTree(
+    row,
+    balanceStub({ status: 'ready', payload: BALANCE }, false),
+    undefined,
+    'token-balance',
+  )).join(' | ')
+  assert.match(text, /余额/)
+  assert.match(text, /¥342\.18/)
+})
+
+test('an unavailable balance renders a muted badge whose title says why', async () => {
+  const row = await loadBundle()
+  const tree = renderTree(
+    row,
+    balanceStub({ status: 'error', reason: 'timeout' }, false),
+    undefined,
+    'token-balance',
+  )
+  assert.match(textsOf(tree).join(' | '), /余额 \| --/)
+  assert.match(nodesOf(tree, 'button')[0].props.title, /超时/)
+})
+
+test('a disabled probe removes the badge rather than showing a broken one', async () => {
+  const row = await loadBundle()
+  const tree = renderTree(
+    row,
+    balanceStub({ status: 'error', reason: 'disabled' }, false),
+    undefined,
+    'token-balance',
+  )
+  assert.equal(tree, null)
+})
+
+test('the open balance panel lists the split, its source and the refresh control', async () => {
+  const row = await loadBundle()
+  const tree = renderTree(
+    row,
+    balanceStub({ status: 'ready', payload: BALANCE }, true),
+    undefined,
+    'token-balance',
+  )
+  const text = textsOf(tree).join(' | ')
+  assert.match(text, /DeepSeek 开放平台账户/)
+  assert.match(text, /账户总余额/)
+  assert.match(text, /赠送余额/)
+  assert.match(text, /API Key 对应的账户/)
+  assert.match(text, /刷新/)
+  // The figure is the account's, not the session's: no billing copy leaks in.
+  assert.doesNotMatch(text, /本会话 Token 计费/)
 })
