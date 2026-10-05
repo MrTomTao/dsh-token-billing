@@ -42,12 +42,11 @@
     "README.md",
     "LICENSE"
   ],
-  "scripts": {
-    "build": "node build.mjs",
-    "test": "node test/projection.test.mjs",
-    "prepare": "node build.mjs"
-  },
   "dependencies": {
     "zod": "^4.6.4"
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node test/projection.test.mjs"
   }
 }

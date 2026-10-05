@@ -1,0 +1,98 @@
+name: CI
+
+# Two things this repo can break silently, both of which already shipped once:
+#
+#  1. lib/ drifting from src/ — git installs run the committed lib/, so a stale
+#     artifact means the version people install is not the version in the repo.
+#  2. a tarball that is not npm-shaped — npm/pnpm strip the first path component
+#     when installing a tarball, so packing without the `package/` wrapper (a raw
+#     `tar czf`, for instance) collapses lib/, src/ and test/ into the package
+#     root and produces a package whose entry points do not exist.
+#
+# Both are asserted below rather than trusted.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # README requires Node 22+.
+        node: ['22', '24']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      # The package has one dependency (zod) and no devDependencies; the build
+      # script is dependency-free by design. `npm install` is enough.
+      - name: Install
+        run: npm install --no-audit --no-fund
+
+      - name: Test
+        run: npm test
+
+      - name: lib/ must match src/
+        run: |
+          npm run build
+          if ! git diff --exit-code -- lib/; then
+            echo "::error::lib/ is out of date. Run 'npm run build' and commit the result."
+            exit 1
+          fi
+          echo "lib/ is in sync with src/."
+
+  package:
+    name: Packaged tarball installs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Pack
+        run: |
+          npm install --no-audit --no-fund
+          npm pack --pack-destination "$RUNNER_TEMP/out"
+          ls -l "$RUNNER_TEMP"/out
+
+      - name: Tarball must carry the package/ wrapper
+        run: |
+          tarball=$(ls "$RUNNER_TEMP"/out/*.tgz)
+          first=$(tar -tzf "$tarball" | head -1)
+          echo "first entry: $first"
+          case "$first" in
+            package/*) echo "ok — npm-shaped" ;;
+            *)
+              echo "::error::tarball is not npm-shaped (first entry: '$first')."
+              echo "::error::Pack with 'npm pack', not 'tar czf'."
+              exit 1
+              ;;
+          esac
+
+      # The end-to-end assertion: a consumer installs the tarball and the
+      # declared entry point actually resolves.
+      - name: Install the tarball and import it
+        run: |
+          tarball=$(ls "$RUNNER_TEMP"/out/*.tgz)
+          mkdir -p "$RUNNER_TEMP/consumer"
+          cd "$RUNNER_TEMP/consumer"
+          npm init -y >/dev/null
+          npm install "$tarball" --no-audit --no-fund
+          test -f node_modules/dsh-token-billing/lib/index.js
+          test -f node_modules/dsh-token-billing/lib/client.js
+          test -f node_modules/dsh-token-billing/cordis.patch.yml
+          node -e "import('dsh-token-billing').then(m => console.log('plugin imports OK —', Object.keys(m).length, 'exports'))"

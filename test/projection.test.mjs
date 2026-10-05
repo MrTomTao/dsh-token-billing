@@ -739,3 +739,41 @@ test('the open balance panel lists the split, its source and the refresh control
   // The figure is the account's, not the session's: no billing copy leaks in.
   assert.doesNotMatch(text, /本会话 Token 计费/)
 })
+
+/* ───────────────── the trigger-anchored panel offset ───────────────── */
+
+test('the panel right edge lines up with its trigger, not the window edge', async () => {
+  const { panelRight } = await loadBundle().then(row => row.factory(requireStub(reactStub(false))))
+  const trigger = right => ({ getBoundingClientRect: () => ({ right }) })
+  // A badge sitting 140px in from the window's right edge keeps its panel there.
+  assert.equal(panelRight(trigger(1300), 1440), 140)
+  // The shipped dialog's 12px viewport margin is the floor, never a negative inset.
+  assert.equal(panelRight(trigger(1436), 1440), 12)
+  // Without a box or a viewport the sheet's own `right` stays in charge.
+  assert.equal(panelRight(null, 1440), null)
+  assert.equal(panelRight(trigger(1300), null), null)
+})
+
+test('the panel top hangs under the measured header, in both header builds', async () => {
+  const { panelTop } = await loadBundle().then(row => row.factory(requireStub(reactStub(false))))
+  const box = (top, height) => ({ top, height, bottom: top + height })
+  const node = (rect, parent = null) => ({ getBoundingClientRect: () => rect, parentElement: parent })
+  // The trigger sits 39px down: 10px header padding + a 28px badge in a 30px title row.
+  const trigger = parent => node(box(11, 28), parent)
+  // Web build: one fixed 76px header, with the badge a direct child of it.
+  assert.equal(panelTop(trigger(node(box(0, 76), node(box(0, 800))))), 84)
+  // Desktop build without a tab strip: the header collapses to 10 + 30 + 10.
+  assert.equal(panelTop(trigger(node(box(10, 30), node(box(0, 50), node(box(0, 800)))))), 58)
+  // Desktop build with tabs, where the badge is nested inside the title row.
+  assert.equal(panelTop(trigger(node(box(10, 30), node(box(0, 76), node(box(0, 800)))))), 84)
+  // Nothing to read: the trigger's own box is the last resort, and no DOM is no offset.
+  assert.equal(panelTop(trigger(null)), 47)
+  assert.equal(panelTop(null), null)
+})
+
+test('a panel keeps only the offsets that could be measured', async () => {
+  const { panelStyle } = await loadBundle().then(row => row.factory(requireStub(reactStub(false))))
+  assert.deepEqual(panelStyle(58, 140), { top: '58px', right: '140px' })
+  assert.deepEqual(panelStyle(null, 140), { right: '140px' })
+  assert.equal(panelStyle(null, null), undefined)
+})

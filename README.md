@@ -46,14 +46,19 @@
 需要：DSH（Web / `web` profile）· Node 22+ · `pnpm` 在 PATH 上（`dsh plugin` 会转发给它）。
 
 ```sh
-# 1) 从目录安装（推荐先这样试）
-dsh plugin --profile web add C:\path\to\dsh-token-billing
+# 1) 从 GitHub 安装（最省事：不经过任何本地文件，profile 也不会记住路径）
+dsh plugin --profile web add github:<you>/dsh-token-billing
 
-# 或者从其他人给你的 tarball 安装
+# 2) 从 Release 里下载的 tarball 安装（可校验，适合离线转发）
 dsh plugin --profile web add ./dsh-token-billing-0.2.3.tgz
+
+# 3) 从目录安装（改代码时用这个）
+dsh plugin --profile web add C:\path\to\dsh-token-billing
 ```
 
 `dsh plugin add` 会做两件事：把这个包作为依赖装进 profile，并因为它声明了 `dsh.bundle` 而把 `cordis.patch.yml` 里那一行加进组合层。
+
+> **`lib/` 是提交进仓库的，这不是疏忽。** `lib/index.js`（Host 半）与 `lib/client.js`（浏览器半）是 DSH 真正加载的两个产物。pnpm **默认拒绝执行 git 依赖的构建脚本**（`ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED`），所以仓库不能靠 `prepare` 在安装时现编译——那样 `add github:…` 会直接失败。把 `lib/` 提交进去，是让 git 安装、tarball 安装、目录安装三条路都能工作的前提。CI 会重新构建并 diff `lib/`，防止它与 `src/` 脱节。
 
 > **装 tarball 就别删那个 tarball。** profile 记住的是文件的**路径**（例如 `file:C:/…/dsh-token-billing-0.2.3.tgz`），文件一旦不在了，后续任何 `dsh plugin` / `pnpm install` 都会以 `ENOENT` 失败（作者实测踩过一次；恢复方式是先 `dsh plugin --profile <name> remove dsh-token-billing` 去掉失效引用，再重新 `add`）。把它放在稳定目录，或者直接装目录 / 从 npm / 从 git 装，就没有这个约束。
 
@@ -184,13 +189,14 @@ node build.mjs      # 重新生成 lib/
 ## 分享给别人
 
 ```sh
-npm pack            # 或 pnpm pack → dsh-token-billing-0.2.3.tgz
+npm pack            # → dsh-token-billing-0.2.3.tgz
 ```
 
-对方 `dsh plugin --profile <name> add ./dsh-token-billing-0.2.3.tgz` 即可。也可以直接发目录 / 发布到 npm / `dsh plugin add github:you/dsh-token-billing`。
+对方 `dsh plugin --profile <name> add ./dsh-token-billing-0.2.3.tgz` 即可。也可以直接发目录 / 发布到 npm / `dsh plugin add github:<you>/dsh-token-billing`。
 
-- **tarball 里已经带好构建产物**（`lib/`），所以对方安装时**不需要**构建权限、不需要允许 `prepare` 脚本、不需要联网（`zod` 是唯一依赖，pnpm 会装）。
-- 从 git 安装拉的是源码而不是产物。本包带 `prepare: node build.mjs`，它只用 Node 内建模块，在没有网、没有 monorepo 的环境里也能跑；不过 pnpm ≥10 会要求对方显式允许该包的构建脚本（`allowBuilds`），这是「允许在本机执行该包的代码」，让对方自行判断。发 tarball 可以完全避开这一步。
+- **务必用 `npm pack` 打包，不要用 `tar czf`。** npm/pnpm 安装 tarball 时会**剥掉第一层路径分量**，所以 tarball 顶层必须是 `package/` 这个包裹目录。`npm pack` 会自动加上；`tar czf` 打出来的扁平包会让 `lib/`、`src/`、`test/` 塌缩进包根目录（`lib/index.js` 变成 `index.js`，`src/client.js` 还会覆盖 `lib/client.js`），装完 `main` 指向的文件不存在 —— **整行不激活、徽标整枚消失**。CI 里有一条断言专门盯这个。
+- **tarball 里已经带好构建产物**（`lib/`），所以对方安装时**不需要**构建权限、不需要允许构建脚本、不需要联网（`zod` 是唯一依赖，pnpm 会装）。
+- **从 git 安装也是产物，不是源码**：`lib/` 提交在仓库里，所以 `add github:…` 与装 tarball 得到的是同一份东西。本包**没有** `prepare` 脚本是有意的 —— pnpm ≥10 默认拒绝执行 git 依赖的构建脚本（`ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED`），留着 `prepare` 反而会让 git 安装直接失败。想改代码就 `node build.mjs` 手动构建，CI 会检查 `lib/` 与 `src/` 是否同步。
 
 ## 这个包长什么样
 

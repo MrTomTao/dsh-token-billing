@@ -1,0 +1,87 @@
+name: Release
+
+# Tag `v0.2.4` (matching package.json's version) and this builds the tarball
+# from the tagged source, verifies it, and attaches it to a GitHub Release.
+#
+# The asset matters: GitHub's own "Source code" archives work for `zip`/`tar`
+# extraction, but a release asset produced by `npm pack` is the exact artifact
+# npm would publish — same package/ wrapper, same contents — so it installs
+# cleanly with `dsh plugin add <url>` and can be checksum-verified.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write # create the release and upload assets
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install
+        run: npm install --no-audit --no-fund
+
+      - name: Test
+        run: npm test
+
+      - name: Tag must match package.json
+        run: |
+          version=$(node -p "require('./package.json').version")
+          tag="${GITHUB_REF_NAME#v}"
+          echo "package.json: $version / tag: $tag"
+          if [ "$tag" != "$version" ]; then
+            echo "::error::tag '$tag' does not match package.json version '$version'"
+            exit 1
+          fi
+
+      - name: lib/ must match src/
+        run: |
+          npm run build
+          git diff --exit-code -- lib/ || {
+            echo "::error::lib/ is out of date. Run 'npm run build' and commit before tagging."
+            exit 1
+          }
+
+      - name: Pack and checksum
+        id: pack
+        run: |
+          mkdir -p dist
+          npm pack --pack-destination dist
+          tarball=$(ls dist/*.tgz)
+          first=$(tar -tzf "$tarball" | head -1)
+          case "$first" in
+            package/*) echo "ok — npm-shaped ($first)" ;;
+            *) echo "::error::not npm-shaped: $first"; exit 1 ;;
+          esac
+          ( cd dist && sha256sum ./*.tgz > SHA256SUMS.txt )
+          cat dist/SHA256SUMS.txt
+          echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tgz
+            dist/SHA256SUMS.txt
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+
+      # Optional: publish to npm as well, so `dsh plugin add dsh-token-billing`
+      # works with no URL or path to remember — and so the profile never stores a
+      # file path that can go stale. Needs an NPM_TOKEN secret; drop the commented
+      # block in to enable it.
+      #
+      # - name: Publish to npm
+      #   run: npm publish --access public --provenance
+      #   env:
+      #     NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

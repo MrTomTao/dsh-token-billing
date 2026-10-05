@@ -1,0 +1,12 @@
+# Keep the JavaScript byte-identical across platforms.
+#
+# lib/client.js is a generated bundle, and it embeds src/client.js verbatim. A
+# checkout with CRLF on one machine and LF on another would produce different
+# bundle bytes for the same source, which makes the "lib/ matches src/" check in
+# CI fail for no real reason.
+* text=auto eol=lf
+
+# Binary: never normalized, never diffed as text.
+*.png binary
+*.tgz binary
+*.tar.gz binary

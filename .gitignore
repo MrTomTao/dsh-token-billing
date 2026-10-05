@@ -1,0 +1,30 @@
+# Dependencies — installed by `pnpm install`; never committed (7.2 MB of zod).
+node_modules/
+
+# Release artifacts — built and attached by the release workflow, not tracked.
+*.tgz
+*.tar.gz
+dist/
+
+# Scratch
+.DS_Store
+Thumbs.db
+*.log
+
+# ---------------------------------------------------------------------------
+# NOTE: lib/ is deliberately NOT ignored.
+#
+# lib/index.js and lib/client.js are the two artifacts DSH actually loads: the
+# Host half (the projection unit) and the browser half (the bundle the client
+# module table reads). They MUST be committed, because pnpm refuses to build a
+# git-hosted dependency by default:
+#
+#   ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED
+#
+# So a source-only repo cannot rely on a `prepare` script to produce lib/ at
+# install time — it would fail outright for `dsh plugin add github:you/repo`,
+# and without the script it installs a package whose declared entry points do
+# not exist. Committing lib/ is what makes every install path work.
+#
+# CI rebuilds and diffs lib/ so it can never drift from src/.
+# ---------------------------------------------------------------------------
