@@ -66,6 +66,9 @@ jobs:
       - name: Pack
         run: |
           npm install --no-audit --no-fund
+          # npm pack does not create --pack-destination; a missing directory is
+          # ENOENT (release.yml already does the equivalent `mkdir -p dist`).
+          mkdir -p "$RUNNER_TEMP/out"
           npm pack --pack-destination "$RUNNER_TEMP/out"
           ls -l "$RUNNER_TEMP"/out
 
