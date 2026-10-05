@@ -50,12 +50,12 @@
 dsh plugin --profile web add C:\path\to\dsh-token-billing
 
 # 或者从其他人给你的 tarball 安装
-dsh plugin --profile web add ./dsh-token-billing-0.2.0.tgz
+dsh plugin --profile web add ./dsh-token-billing-0.2.3.tgz
 ```
 
 `dsh plugin add` 会做两件事：把这个包作为依赖装进 profile，并因为它声明了 `dsh.bundle` 而把 `cordis.patch.yml` 里那一行加进组合层。
 
-> **装 tarball 就别删那个 tarball。** profile 记住的是文件的**路径**（例如 `file:C:/…/dsh-token-billing-0.2.0.tgz`），文件一旦不在了，后续任何 `dsh plugin` / `pnpm install` 都会以 `ENOENT` 失败（作者实测踩过一次；恢复方式是先 `dsh plugin --profile <name> remove dsh-token-billing` 去掉失效引用，再重新 `add`）。把它放在稳定目录，或者直接装目录 / 从 npm / 从 git 装，就没有这个约束。
+> **装 tarball 就别删那个 tarball。** profile 记住的是文件的**路径**（例如 `file:C:/…/dsh-token-billing-0.2.3.tgz`），文件一旦不在了，后续任何 `dsh plugin` / `pnpm install` 都会以 `ENOENT` 失败（作者实测踩过一次；恢复方式是先 `dsh plugin --profile <name> remove dsh-token-billing` 去掉失效引用，再重新 `add`）。把它放在稳定目录，或者直接装目录 / 从 npm / 从 git 装，就没有这个约束。
 
 > **从目录（`link:`）安装时，插件目录自己必须有 `node_modules`。** `dsh plugin add <目录>` 装出来的是 `link:` 依赖，而 pnpm **不会**为 `link:` 依赖安装它自己的依赖；运行时又是从被链接目录的真实路径去解析 `zod` 的。所以目录里没有 `node_modules` 时，profile 的 `node_modules` 里不会有 `zod`，插件的 `import { z } from 'zod'` 也解析不到 —— 后果是**整行不激活**：
 >
@@ -184,10 +184,10 @@ node build.mjs      # 重新生成 lib/
 ## 分享给别人
 
 ```sh
-npm pack            # 或 pnpm pack → dsh-token-billing-0.2.0.tgz
+npm pack            # 或 pnpm pack → dsh-token-billing-0.2.3.tgz
 ```
 
-对方 `dsh plugin --profile <name> add ./dsh-token-billing-0.2.0.tgz` 即可。也可以直接发目录 / 发布到 npm / `dsh plugin add github:you/dsh-token-billing`。
+对方 `dsh plugin --profile <name> add ./dsh-token-billing-0.2.3.tgz` 即可。也可以直接发目录 / 发布到 npm / `dsh plugin add github:you/dsh-token-billing`。
 
 - **tarball 里已经带好构建产物**（`lib/`），所以对方安装时**不需要**构建权限、不需要允许 `prepare` 脚本、不需要联网（`zod` 是唯一依赖，pnpm 会装）。
 - 从 git 安装拉的是源码而不是产物。本包带 `prepare: node build.mjs`，它只用 Node 内建模块，在没有网、没有 monorepo 的环境里也能跑；不过 pnpm ≥10 会要求对方显式允许该包的构建脚本（`allowBuilds`），这是「允许在本机执行该包的代码」，让对方自行判断。发 tarball 可以完全避开这一步。

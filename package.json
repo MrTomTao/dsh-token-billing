@@ -1,6 +1,6 @@
 {
   "name": "dsh-token-billing",
-  "version": "0.2.0",
+  "version": "0.2.3",
   "description": "Session token billing for the DeepSeek Harness: a host-registered cost projection plus a live cost badge, and an account-balance badge, in the web session header",
   "keywords": [
     "dsh",
